@@ -36,7 +36,7 @@ It drops `at`: to run the loop again then, set `last` to the name of the newest 
 
 What the lines are, by their `type`:
 
-- `reader`: the first line, `"state":"began"`, names the `model` of whisper and the `inputs` it listens to. The last line, `"state":"ended"`, says the writing stopped. None comes where xlisten was killed: no line for a long while may mean that, too, or that nobody is speaking.
+- `reader`: the first line, `"state":"began"`, names the `model` of whisper, the `inputs` it listens to, and whether the microphone goes through `enhance`ment (RE-USE) first. The last line, `"state":"ended"`, says the writing stopped. None comes where xlisten was killed: no line for a long while may mean that, too, or that nobody is speaking.
 - `speech`: something said aloud, as whisper read it. `from` is `me` (the microphone: the person who called you, or somebody in the same room) or `others` (the sound of the apps: the others of an online meeting, or whatever else the Mac played). Who among the others spoke is not told. `start_ms` and `end_ms` are when it was said, on the clock of `at`. Whisper mishears: a word that makes no sense may be a word that sounds like it.
 - `note`: a line added to `inbox.txt`, by you or by the person.
 - `error`: something went wrong; the reader goes on.
