@@ -25,4 +25,6 @@ RE-USE took 0.31 to 0.37 of the length of each utterance (14 utterances of 1.4 t
 
 ## Words whisper writes of its own
 
-Over sound with no voice, whisper writes a line of its own, `ご視聴ありがとうございました` above all. Without Silero VAD, one came from 1.4 s of the microphone. With Silero VAD in whisper-server and RE-USE before it, 3 of 9 lines of the microphone were that line, where the microphone heard `say` faintly from the monitor's speakers; the tap's lines of the same `say` were right. Not run: which of RE-USE or the faint sound brings them, and a person speaking into the microphone.
+Over sound with no voice, whisper writes a line of its own, `ご視聴ありがとうございました` above all. Without Silero VAD, one came from 1.4 s of the microphone. With Silero VAD in whisper-server and RE-USE before it, 3 of 9 lines of the microphone were that line, where the microphone heard `say` faintly from the monitor's speakers; the tap's lines of the same `say` were right. Not run: which of RE-USE or the faint sound brings them.
+
+The person then spoke into the microphone for about 12 s of a run of 30 s (the stream stopped): 8 utterances, none of them that line. The same utterances were read again by whisper without RE-USE and with it (`--keep-audio`); the 4 with no voice were empty both ways, and the 4 with one differed little: `もう始まってるのか?` without against `もう始まっているのか` with, `テストですね` against `テストですね。`, `うん` against `ん`, `はい` against `え`. So few words say nothing about which is better.
