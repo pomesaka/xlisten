@@ -23,12 +23,14 @@ from xlisten.audio import read_wav, resample, wav_bytes
 from xlisten.inputs import Microphone, SystemAudio
 from xlisten.lines import EventWriter, encode, now_ms
 from xlisten.segmenter import Segmenter, Utterance
-from xlisten.whisper import WhisperServer, model_path
+from xlisten.servers import ROOT, Enhancer, Whisper, whisper_model
 
 # FIXME: measure small-q5_1 (XmoQ's default) against this on Japanese meetings, and keep the one
 # that is good enough and keeps up. Both are in XmoQ's cache.
 DEFAULT_MODEL = "large-v3-turbo-q5_0"
 INBOX_LINE_BYTES = 4096
+# Out of git (.gitignore). Kept until the person removes them: how long is not decided.
+RECORDINGS = ROOT / "recordings"
 
 
 def log(message: str) -> None:
@@ -39,8 +41,10 @@ class Transcriber:
     """One thread that hands utterances to whisper in the order they ended, both inputs together.
     WHY one: whisper-server reads one request at a time anyway."""
 
-    def __init__(self, server: WhisperServer, writer: EventWriter, keep_audio: Path | None) -> None:
-        self._server = server
+    def __init__(self, whisper: Whisper, enhancer: Enhancer | None, writer: EventWriter,
+                 keep_audio: Path | None) -> None:
+        self._whisper = whisper
+        self._enhancer = enhancer
         self._writer = writer
         self._keep = keep_audio
         self._queue: queue.Queue[tuple[str, Utterance] | None] = queue.Queue()
@@ -55,21 +59,34 @@ class Transcriber:
         self._queue.put(None)
         self._thread.join()
 
+    def _keep_wav(self, name: str, samples: np.ndarray) -> None:
+        if self._keep is not None:
+            self._keep.mkdir(parents=True, exist_ok=True)
+            (self._keep / name).write_bytes(wav_bytes(samples))
+
     def _run(self) -> None:
         while (item := self._queue.get()) is not None:
             source, u = item
             samples = resample(u.samples, u.rate)
-            if self._keep is not None:
-                self._keep.mkdir(parents=True, exist_ok=True)
-                (self._keep / f"{u.start_ms}-{source}.wav").write_bytes(wav_bytes(samples))
-            began = time.monotonic()
+            self._keep_wav(f"{u.start_ms}-{source}.wav", samples)
+            seconds = len(samples) / 16000
+            took: list[str] = []
             try:
-                text = self._server.transcribe(samples)
-            except OSError as e:
-                self._writer.write({"type": "error", "message": f"whisper: {e}"})
+                # WHY the microphone only: RE-USE takes noise and the echo of a room out of a
+                # recording; the sound of the apps comes as the meeting app sent it, with none.
+                if self._enhancer is not None and source == "me":
+                    began = time.monotonic()
+                    samples = self._enhancer.enhance(samples)
+                    t = time.monotonic() - began
+                    took.append(f"RE-USE {t:.2f}s ({t / seconds:.2f} of its length)")
+                    self._keep_wav(f"{u.start_ms}-{source}-enhanced.wav", samples)
+                began = time.monotonic()
+                text = self._whisper.transcribe(samples)
+                took.append(f"whisper {time.monotonic() - began:.2f}s")
+            except (OSError, ValueError) as e:
+                self._writer.write({"type": "error", "message": f"{source}: {e}"})
                 continue
-            took = time.monotonic() - began
-            log(f"{source}: {len(samples) / 16000:.1f}s of speech, whisper {took:.2f}s, "
+            log(f"{source}: {seconds:.1f}s of speech, {', '.join(took)}, "
                 f"line {(now_ms() - u.end_ms) / 1000:.2f}s after it ended")
             if not text:
                 continue
@@ -150,13 +167,18 @@ def listen(args: argparse.Namespace) -> int:
     out.mkdir(parents=True, exist_ok=True)
     write_agent_md(out)
     writer = EventWriter(out)
-    server = WhisperServer(model_path(args.model), out / "logs" / "whisper-server.log")
+    whisper = Whisper(whisper_model(args.model), out / "logs" / "whisper-server.log")
+    enhancer = Enhancer(out / "logs" / "speech-serve.log") if args.enhance and args.mic else None
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
-    transcriber = Transcriber(server, writer, Path(args.keep_audio) if args.keep_audio else None)
+    keep = None if args.no_keep_audio else Path(args.keep_audio or RECORDINGS / str(now_ms()))
+    transcriber = Transcriber(whisper, enhancer, writer, keep)
+    if keep is not None:
+        log(f"each utterance is kept in {keep}")
     writer.write({"type": "reader", "state": "began", "model": args.model,
+                  "enhance": enhancer is not None,
                   "inputs": [s for s, on in (("me", args.mic), ("others", args.system)) if on]})
     inputs: list[Input] = []
     devices: list[Microphone | SystemAudio] = []
@@ -189,7 +211,9 @@ def listen(args: argparse.Namespace) -> int:
     for i in inputs:
         i.close()
     transcriber.close()
-    server.stop()
+    whisper.stop()
+    if enhancer is not None:
+        enhancer.stop()
     writer.write({"type": "reader", "state": "ended"})
     writer.flush()
     return 0
@@ -199,7 +223,8 @@ def transcribe(args: argparse.Namespace) -> int:
     """Plays a recording through the segmenter as fast as it reads, and prints `speech` lines whose
     `start_ms` and `end_ms` are from the start of the file."""
     samples, rate = read_wav(Path(args.file))
-    server = WhisperServer(model_path(args.model), Path(args.log))
+    whisper = Whisper(whisper_model(args.model), Path(args.log))
+    enhancer = Enhancer(Path(args.log)) if args.enhance else None
     seg = Segmenter(rate)
     block = rate // 10
     utterances: list[Utterance] = []
@@ -208,15 +233,26 @@ def transcribe(args: argparse.Namespace) -> int:
         utterances += seg.push(part, (i + len(part)) * 1000 / rate)
     if (u := seg.finish()) is not None:
         utterances.append(u)
-    total = 0.0
+    took_whisper = took_enhance = speech = 0.0
     for n, u in enumerate(utterances):
+        part = resample(u.samples, u.rate)
+        speech += len(part) / 16000
+        if enhancer is not None:
+            began = time.monotonic()
+            part = enhancer.enhance(part)
+            took_enhance += time.monotonic() - began
         began = time.monotonic()
-        text = server.transcribe(resample(u.samples, u.rate))
-        total += time.monotonic() - began
+        text = whisper.transcribe(part)
+        took_whisper += time.monotonic() - began
         print(encode({"type": "speech", "number": n, "from": args.source, "text": text,
                       "start_ms": u.start_ms, "end_ms": u.end_ms}), flush=True)
-    server.stop()
-    log(f"{len(samples) / rate:.1f}s of audio, {len(utterances)} utterances, whisper {total:.2f}s")
+    whisper.stop()
+    if enhancer is not None:
+        enhancer.stop()
+    enhanced = (f", RE-USE {took_enhance:.2f}s ({took_enhance / speech:.2f} of their length)"
+                if enhancer is not None else "")
+    log(f"{len(samples) / rate:.1f}s of audio, {len(utterances)} utterances of {speech:.1f}s"
+        f"{enhanced}, whisper {took_whisper:.2f}s")
     return 0
 
 
@@ -263,8 +299,11 @@ def main() -> int:
     lp.add_argument("--no-mic", dest="mic", action="store_false")
     lp.add_argument("--no-system", dest="system", action="store_false")
     lp.add_argument("--mic-device", default=None, help="a name or number of sounddevice")
+    lp.add_argument("--no-enhance", dest="enhance", action="store_false",
+                    help="hand the microphone to whisper as it is, without RE-USE")
     lp.add_argument("--keep-audio", default=None,
-                    help="a folder to keep each utterance in as a WAV file; none kept without it")
+                    help="the folder to keep each utterance in as WAV; recordings/<ms> unless given")
+    lp.add_argument("--no-keep-audio", action="store_true")
     lp.add_argument("--seconds", type=float, default=0, help="stop after this many seconds")
     lp.set_defaults(run=listen)
 
@@ -272,6 +311,7 @@ def main() -> int:
     tp.add_argument("file")
     tp.add_argument("--model", default=DEFAULT_MODEL)
     tp.add_argument("--source", default="me")
+    tp.add_argument("--enhance", action="store_true", help="through RE-USE first")
     tp.add_argument("--log", default="/dev/null", help="where whisper-server writes")
     tp.set_defaults(run=transcribe)
 

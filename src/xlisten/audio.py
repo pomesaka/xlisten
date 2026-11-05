@@ -46,12 +46,15 @@ def wav_bytes(samples: np.ndarray, rate: int = WHISPER_RATE) -> bytes:
 
 
 def read_wav(path: Path) -> tuple[np.ndarray, int]:
+    return parse_wav(path.read_bytes())
+
+
+def parse_wav(data: bytes) -> tuple[np.ndarray, int]:
     """Reads 16-bit integer or 32-bit float PCM, any number of channels, as mono.
     WHY by hand: the wave module of Python 3.12 refuses float PCM (format 3), which is what
     catap and many recorders write."""
-    data = path.read_bytes()
     if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-        raise ValueError(f"{path}: not a WAV file")
+        raise ValueError("not a WAV file")
     pos = 12
     fmt: tuple[int, int, int, int] | None = None
     while pos + 8 <= len(data):
@@ -65,14 +68,14 @@ def read_wav(path: Path) -> tuple[np.ndarray, int]:
             fmt = (tag, channels, rate, bits)
         elif cid == b"data":
             if fmt is None:
-                raise ValueError(f"{path}: data before fmt")
+                raise ValueError("data before fmt")
             tag, channels, rate, bits = fmt
             if tag == 1 and bits == 16:
                 samples = np.frombuffer(body, "<i2").astype(np.float32) / 32768.0
             elif tag == 3 and bits == 32:
                 samples = np.frombuffer(body, "<f4").astype(np.float32)
             else:
-                raise ValueError(f"{path}: format {tag} with {bits} bits is not read")
+                raise ValueError(f"format {tag} with {bits} bits is not read")
             return to_mono(samples, channels), rate
         pos += 8 + size + (size & 1)
-    raise ValueError(f"{path}: no data")
+    raise ValueError("no data")
