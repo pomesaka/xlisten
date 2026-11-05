@@ -1,4 +1,4 @@
-# The first runs of xlisten (2026-11-05)
+# The first runs of xlisten, the prototype in Python (2026-11-05)
 
 On an Apple M3 Pro with 18 GB, macOS 14.4: whisper.cpp v1.9.5 (Metal), speech.cpp v0.10.1 (Metal), the models of XmoQ's cache. Each was run once; the seconds are those xlisten printed.
 

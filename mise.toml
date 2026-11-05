@@ -1,17 +1,17 @@
+# Rust is not listed here: rust-toolchain.toml pins it, as XmoQ does.
 [tools]
-# Builds whisper.cpp (scripts/build-whisper.sh). The same version XmoQ pins.
+# Builds speech.cpp (scripts/build-speech.sh), and whisper.cpp in the build script of
+# whisper-rs-sys. The same version XmoQ pins.
 cmake = "4.4.4"
-# Keeps Python and every package in .venv of this folder; the version of Python is .python-version.
-uv = "0.11.21"
-
-[tasks.whisper]
-description = "Build whisper-server of whisper.cpp into .cache/whisper.cpp (once; again when the version in the script changes)"
-run = "scripts/build-whisper.sh"
 
 [tasks.speech]
-description = "Build speech of speech.cpp into .cache/speech.cpp and fetch the GGUF of RE-USE into .cache/models (once)"
+description = "Build speech.cpp into .cache/speech.cpp and fetch RE-USE and Nemotron 3 Diarization into .cache/models (once)"
 run = "scripts/build-speech.sh"
 
 [tasks.listen]
-description = "Transcribe the microphone and the sound of the meeting apps into a folder: mise run listen -- --out ~/xlisten/<name>"
-run = "uv run xlisten"
+description = "Transcribe the microphone and the sound of the apps into a folder: mise run listen -- --out ~/xlisten/<name>"
+run = "cargo run --release --locked --quiet -- listen"
+
+[tasks.check]
+description = "cargo fmt --check, clippy and test"
+run = ["cargo fmt --check", "cargo clippy --release --locked --all-targets -- -D warnings", "cargo test --release --locked"]
