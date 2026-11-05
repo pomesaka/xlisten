@@ -3,6 +3,7 @@
     xlisten listen --out DIR          the two inputs into DIR/events/
     xlisten transcribe FILE.wav       a recording, as the lines `listen` would write, on stdout
     xlisten record-mic FILE.wav       the microphone into a WAV file, until Ctrl-C
+    xlisten latency DIR               how long after the end of speech its line came
 """
 
 from __future__ import annotations
@@ -234,6 +235,23 @@ def record_mic(args: argparse.Namespace) -> int:
     return 0
 
 
+def latency(args: argparse.Namespace) -> int:
+    """How long after the end of each utterance its `speech` line was written (`at - end_ms`)."""
+    import json
+    import statistics
+
+    by: dict[str, list[int]] = {}
+    for f in sorted((Path(args.out) / "events").glob("[0-9]*.jsonl")):
+        for raw in f.read_text(encoding="utf-8").splitlines():
+            line = json.loads(raw)
+            if line["type"] == "speech":
+                by.setdefault(line["from"], []).append(line["at"] - line["end_ms"])
+    for source, ms in sorted(by.items()):
+        print(f"{source}: {len(ms)} lines, median {statistics.median(ms) / 1000:.2f}s, "
+              f"max {max(ms) / 1000:.2f}s")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="xlisten")
     sub = p.add_subparsers(dest="command", required=True)
@@ -262,6 +280,10 @@ def main() -> int:
     rp.add_argument("--mic-device", default=None)
     rp.add_argument("--seconds", type=float, default=0)
     rp.set_defaults(run=record_mic)
+
+    ap = sub.add_parser("latency", help="seconds from the end of speech to its line, of --out")
+    ap.add_argument("out")
+    ap.set_defaults(run=latency)
 
     args = p.parse_args()
     return int(args.run(args))
