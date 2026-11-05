@@ -8,6 +8,10 @@ uv = "0.11.21"
 description = "Build whisper-server of whisper.cpp into .cache/whisper.cpp (once; again when the version in the script changes)"
 run = "scripts/build-whisper.sh"
 
+[tasks.speech]
+description = "Build speech of speech.cpp into .cache/speech.cpp and fetch the GGUF of RE-USE into .cache/models (once)"
+run = "scripts/build-speech.sh"
+
 [tasks.listen]
 description = "Transcribe the microphone and the sound of the meeting apps into a folder: mise run listen -- --out ~/xlisten/<name>"
 run = "uv run xlisten"
