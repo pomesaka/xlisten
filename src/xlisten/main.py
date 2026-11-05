@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import os
 import queue
 import signal
 import sys
@@ -164,6 +166,11 @@ def listen(args: argparse.Namespace) -> int:
     out = Path(args.out).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
     write_agent_md(out)
+    # For whoever started xlisten in the background to stop it by its PID (SIGTERM ends it as
+    # Ctrl-C does, with the `ended` line).
+    pid_file = out / "xlisten.pid"
+    pid_file.write_text(f"{os.getpid()}\n")
+    atexit.register(pid_file.unlink, missing_ok=True)
     writer = EventWriter(out)
     whisper = Whisper(whisper_model(args.model), out / "logs" / "whisper-server.log")
     enhancer = Enhancer(out / "logs" / "speech-serve.log") if args.enhance and args.mic else None
