@@ -23,14 +23,12 @@ from xlisten.audio import read_wav, resample, wav_bytes
 from xlisten.inputs import Microphone, SystemAudio
 from xlisten.lines import EventWriter, encode, now_ms
 from xlisten.segmenter import Segmenter, Utterance
-from xlisten.servers import ROOT, Enhancer, Whisper, whisper_model
+from xlisten.servers import Enhancer, Whisper, whisper_model
 
 # FIXME: measure small-q5_1 (XmoQ's default) against this on Japanese meetings, and keep the one
 # that is good enough and keeps up. Both are in XmoQ's cache.
 DEFAULT_MODEL = "large-v3-turbo-q5_0"
 INBOX_LINE_BYTES = 4096
-# Out of git (.gitignore). Kept until the person removes them: how long is not decided.
-RECORDINGS = ROOT / "recordings"
 
 
 def log(message: str) -> None:
@@ -173,7 +171,7 @@ def listen(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
-    keep = None if args.no_keep_audio else Path(args.keep_audio or RECORDINGS / str(now_ms()))
+    keep = Path(args.keep_audio).expanduser() if args.keep_audio else None
     transcriber = Transcriber(whisper, enhancer, writer, keep)
     if keep is not None:
         log(f"each utterance is kept in {keep}")
@@ -302,8 +300,8 @@ def main() -> int:
     lp.add_argument("--no-enhance", dest="enhance", action="store_false",
                     help="hand the microphone to whisper as it is, without RE-USE")
     lp.add_argument("--keep-audio", default=None,
-                    help="the folder to keep each utterance in as WAV; recordings/<ms> unless given")
-    lp.add_argument("--no-keep-audio", action="store_true")
+                    help="a folder to keep each utterance in as WAV, with what RE-USE made of it; "
+                         "none is kept without it")
     lp.add_argument("--seconds", type=float, default=0, help="stop after this many seconds")
     lp.set_defaults(run=listen)
 

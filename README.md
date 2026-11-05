@@ -20,7 +20,7 @@ Read <out>/AGENT.md and take part in the meeting as it says.
 
 macOS asks, the first time, for the microphone and for recording the system's sound, for the terminal app xlisten runs in. Without the second, the tap hands only zeros and no `others` line comes.
 
-Each utterance is kept as WAV in `recordings/<ms>/` (out of git), with what RE-USE made of it beside it; `--keep-audio <dir>` puts them elsewhere, `--no-keep-audio` keeps none. Nothing removes them.
+No sound is kept. With `--keep-audio <dir>`, each utterance is kept there as WAV, with what RE-USE made of it beside it; nothing removes them. `recordings/` is out of git for such a folder.
 
 `uv run xlisten transcribe [--enhance] FILE.wav` writes the lines of a recording on stdout, and `uv run xlisten record-mic FILE.wav` records the microphone, to compare settings on the same sound.
 
