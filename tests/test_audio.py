@@ -31,27 +31,31 @@ def run(samples: np.ndarray, block: int = 1024) -> list[tuple[int, int]]:
 
 
 @pytest.mark.parametrize(
-    ("samples", "expected"),
+    ("samples", "expected", "end_within_ms"),
     [
-        pytest.param(np.concatenate([quiet(2), tone(1.5), quiet(2)]), [(2000, 3500)],
+        pytest.param(np.concatenate([quiet(2), tone(1.5), quiet(2)]), [(2000, 3500)], 30,
                      id="one utterance, from its first frame to its last"),
         pytest.param(np.concatenate([quiet(2), tone(1), quiet(0.3), tone(1), quiet(2)]),
-                     [(2000, 4300)], id="a pause shorter than the close is inside"),
+                     [(2000, 4300)], 30, id="a pause shorter than the close is inside"),
         pytest.param(np.concatenate([quiet(2), tone(1), quiet(1), tone(1), quiet(2)]),
-                     [(2000, 3000), (4000, 5000)], id="a pause of the close or more ends it"),
-        pytest.param(np.concatenate([quiet(2), tone(0.2), quiet(2)]), [],
+                     [(2000, 3000), (4000, 5000)], 30, id="a pause of the close or more ends it"),
+        pytest.param(np.concatenate([quiet(2), tone(0.2), quiet(2)]), [], 30,
                      id="a click is no utterance"),
-        pytest.param(np.concatenate([quiet(2), tone(1.5)]), [(2000, 3500)],
+        pytest.param(np.concatenate([quiet(2), tone(1.5)]), [(2000, 3500)], 30,
                      id="the end of the stream ends it"),
+        pytest.param(np.concatenate([quiet(2), tone(8.5), quiet(0.2), tone(5.5), quiet(2)]),
+                     [(2000, 10500), (10500, 16200)], 200,
+                     id="one that never gets quiet is cut at its quietest, and the rest goes on"),
     ],
 )
-def test_segmenter(samples: np.ndarray, expected: list[tuple[int, int]]) -> None:
-    # Within a frame of 30 ms, and the pre-roll of 300 ms before the start is cut back to quiet.
+def test_segmenter(samples: np.ndarray, expected: list[tuple[int, int]], end_within_ms: int) -> None:
+    # The start may be up to the pre-roll (300 ms) and a frame early. The end is within a frame,
+    # or, where it is cut, anywhere in the dip of 200 ms where it is quietest.
     got = run(samples)
     assert len(got) == len(expected)
     for (gs, ge), (es, ee) in zip(got, expected, strict=True):
-        assert es - 330 <= gs <= es
-        assert abs(ge - ee) <= 30
+        assert es - 330 <= gs <= es + end_within_ms - 30
+        assert abs(ge - ee) <= end_within_ms
 
 
 def test_resample_keeps_the_length_and_a_low_tone() -> None:

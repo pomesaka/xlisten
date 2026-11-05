@@ -20,8 +20,12 @@ OPEN_FRAMES = 3
 PRE_ROLL_MS = 300
 # Quiet that ends an utterance; the latency of a line is at least this.
 CLOSE_MS = 600
-# WHY 20 s: whisper reads 30 s at a time; a longer utterance is cut and read in pieces.
-LONGEST_MS = 20_000
+# Where the sound never gets quiet (a stream with music under the voices), an utterance is cut at
+# this length, at its quietest frame of the last CUT_WITHIN_MS, and the rest opens the next one.
+# WHY 10 s: at 20 s, a line of `others` came only every 20 s through a stream with music
+# (2026-11-05); and RE-USE was trained on less than 10 s (its model card).
+LONGEST_MS = 10_000
+CUT_WITHIN_MS = 3_000
 SHORTEST_MS = 400
 
 
@@ -49,6 +53,7 @@ class Segmenter:
         self._pre: list[np.ndarray] = []
         self._run = 0
         self._open: list[np.ndarray] | None = None
+        self._open_dbs: list[float] = []
         self._open_start_ms = 0.0
         self._first_speech_ms = 0.0
         self._last_speech_end_ms = 0.0
@@ -87,6 +92,7 @@ class Segmenter:
             self._run = self._run + 1 if speech else 0
             if self._run >= OPEN_FRAMES:
                 self._open = list(self._pre)
+                self._open_dbs = [_db(f) for f in self._pre]
                 self._open_start_ms = t + FRAME_MS - len(self._pre) * FRAME_MS
                 self._pre = []
                 self._first_speech_ms = t + FRAME_MS - OPEN_FRAMES * FRAME_MS
@@ -95,15 +101,34 @@ class Segmenter:
             return None
 
         self._open.append(frame)
+        self._open_dbs.append(db)
         if speech:
             self._last_speech_end_ms = t + FRAME_MS
             self._quiet_ms = 0
         else:
             self._quiet_ms += FRAME_MS
         length_ms = len(self._open) * FRAME_MS
-        if self._quiet_ms >= CLOSE_MS or length_ms >= LONGEST_MS:
+        if self._quiet_ms >= CLOSE_MS:
             return self._close()
+        if length_ms >= LONGEST_MS:
+            return self._cut()
         return None
+
+    def _cut(self) -> Utterance:
+        assert self._open is not None
+        within = CUT_WITHIN_MS // FRAME_MS
+        tail = self._open_dbs[-within:]
+        k = len(self._open) - within + int(np.argmin(tail))
+        cut_ms = self._open_start_ms + k * FRAME_MS
+        u = Utterance(
+            samples=np.concatenate(self._open[:k]),
+            rate=self.rate,
+            start_ms=round(self._open_start_ms),
+            end_ms=round(cut_ms),
+        )
+        self._open, self._open_dbs = self._open[k:], self._open_dbs[k:]
+        self._open_start_ms = self._first_speech_ms = cut_ms
+        return u
 
     def _close(self) -> Utterance | None:
         frames, self._open = self._open, None
