@@ -1,0 +1,271 @@
+"""xlisten: transcribes the microphone and the sound of meeting apps into a folder an agent reads.
+
+    xlisten listen --out DIR          the two inputs into DIR/events/
+    xlisten transcribe FILE.wav       a recording, as the lines `listen` would write, on stdout
+    xlisten record-mic FILE.wav       the microphone into a WAV file, until Ctrl-C
+"""
+
+from __future__ import annotations
+
+import argparse
+import queue
+import signal
+import sys
+import threading
+import time
+from importlib import resources
+from pathlib import Path
+
+import numpy as np
+
+from xlisten.audio import read_wav, resample, wav_bytes
+from xlisten.inputs import Microphone, SystemAudio
+from xlisten.lines import EventWriter, encode, now_ms
+from xlisten.segmenter import Segmenter, Utterance
+from xlisten.whisper import WhisperServer, model_path
+
+# FIXME: measure small-q5_1 (XmoQ's default) against this on Japanese meetings, and keep the one
+# that is good enough and keeps up. Both are in XmoQ's cache.
+DEFAULT_MODEL = "large-v3-turbo-q5_0"
+INBOX_LINE_BYTES = 4096
+
+
+def log(message: str) -> None:
+    print(f"xlisten: {message}", file=sys.stderr, flush=True)
+
+
+class Transcriber:
+    """One thread that hands utterances to whisper in the order they ended, both inputs together.
+    WHY one: whisper-server reads one request at a time anyway."""
+
+    def __init__(self, server: WhisperServer, writer: EventWriter, keep_audio: Path | None) -> None:
+        self._server = server
+        self._writer = writer
+        self._keep = keep_audio
+        self._queue: queue.Queue[tuple[str, Utterance] | None] = queue.Queue()
+        self._number = 0
+        self._thread = threading.Thread(target=self._run, name="transcriber", daemon=True)
+        self._thread.start()
+
+    def put(self, source: str, u: Utterance) -> None:
+        self._queue.put((source, u))
+
+    def close(self) -> None:
+        self._queue.put(None)
+        self._thread.join()
+
+    def _run(self) -> None:
+        while (item := self._queue.get()) is not None:
+            source, u = item
+            samples = resample(u.samples, u.rate)
+            if self._keep is not None:
+                self._keep.mkdir(parents=True, exist_ok=True)
+                (self._keep / f"{u.start_ms}-{source}.wav").write_bytes(wav_bytes(samples))
+            began = time.monotonic()
+            try:
+                text = self._server.transcribe(samples)
+            except OSError as e:
+                self._writer.write({"type": "error", "message": f"whisper: {e}"})
+                continue
+            took = time.monotonic() - began
+            log(f"{source}: {len(samples) / 16000:.1f}s of speech, whisper {took:.2f}s, "
+                f"line {(now_ms() - u.end_ms) / 1000:.2f}s after it ended")
+            if not text:
+                continue
+            self._writer.write({
+                "type": "speech", "number": self._number, "from": source, "text": text,
+                "start_ms": u.start_ms, "end_ms": u.end_ms,
+            })
+            self._number += 1
+
+
+class Input:
+    """Takes blocks off the thread of the audio library and cuts them into utterances."""
+
+    def __init__(self, source: str, transcriber: Transcriber) -> None:
+        self.source = source
+        self._transcriber = transcriber
+        self._blocks: queue.SimpleQueue[tuple[np.ndarray, float, int] | None] = queue.SimpleQueue()
+        self._thread = threading.Thread(target=self._run, name=source, daemon=True)
+        self._thread.start()
+
+    def block(self, samples: np.ndarray, end_ms: float, rate: int) -> None:
+        self._blocks.put((samples, end_ms, rate))
+
+    def close(self) -> None:
+        self._blocks.put(None)
+        self._thread.join()
+
+    def _run(self) -> None:
+        seg: Segmenter | None = None
+        while (item := self._blocks.get()) is not None:
+            samples, end_ms, rate = item
+            if seg is None or seg.rate != rate:
+                seg = Segmenter(rate)
+            for u in seg.push(samples, end_ms):
+                self._transcriber.put(self.source, u)
+        if seg is not None and (u := seg.finish()) is not None:
+            self._transcriber.put(self.source, u)
+
+
+class Inbox:
+    """Lines added to inbox.txt become `note` lines. What is in it at the start is passed over."""
+
+    def __init__(self, path: Path, writer: EventWriter) -> None:
+        self._path = path
+        self._writer = writer
+        path.touch()
+        self._pos = path.stat().st_size
+        self._partial = b""
+
+    def poll(self) -> None:
+        size = self._path.stat().st_size
+        if size < self._pos:  # written anew: read it from the start
+            self._pos, self._partial = 0, b""
+        if size == self._pos:
+            return
+        with self._path.open("rb") as f:
+            f.seek(self._pos)
+            data = self._partial + f.read(size - self._pos)
+        self._pos = size
+        *whole, self._partial = data.split(b"\n")
+        for raw in whole:
+            if len(raw) > INBOX_LINE_BYTES:
+                self._writer.write({"type": "error",
+                                    "message": f"a line of inbox.txt over {INBOX_LINE_BYTES} bytes is not read"})
+                continue
+            text = raw.decode("utf-8", errors="replace").rstrip("\r")
+            if text.strip():
+                self._writer.write({"type": "note", "text": text})
+
+
+def write_agent_md(out: Path) -> None:
+    text = resources.files("xlisten").joinpath("AGENT.md").read_text(encoding="utf-8")
+    (out / "AGENT.md").write_text(text, encoding="utf-8")
+
+
+def listen(args: argparse.Namespace) -> int:
+    out = Path(args.out).expanduser().resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    write_agent_md(out)
+    writer = EventWriter(out)
+    server = WhisperServer(model_path(args.model), out / "logs" / "whisper-server.log")
+    stop = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+
+    transcriber = Transcriber(server, writer, Path(args.keep_audio) if args.keep_audio else None)
+    writer.write({"type": "reader", "state": "began", "model": args.model,
+                  "inputs": [s for s, on in (("me", args.mic), ("others", args.system)) if on]})
+    inputs: list[Input] = []
+    devices: list[Microphone | SystemAudio] = []
+    if args.mic:
+        mine = Input("me", transcriber)
+        mic = Microphone(lambda s, t: mine.block(s, t, mic.rate), args.mic_device)
+        log(f"microphone: {mic.name}, {mic.rate} Hz")
+        inputs.append(mine)
+        devices.append(mic)
+    if args.system:
+        theirs = Input("others", transcriber)
+        system = SystemAudio(lambda s, t: theirs.block(s, t, system.rate))
+        inputs.append(theirs)
+        devices.append(system)
+    for d in devices:
+        d.start()
+    inbox = Inbox(out / "inbox.txt", writer)
+    log(f"Read {out}/AGENT.md and take part in the meeting as it says.")
+
+    began = time.monotonic()
+    while not stop.is_set():
+        stop.wait(1.0)
+        inbox.poll()
+        writer.flush()
+        if args.seconds and time.monotonic() - began >= args.seconds:
+            break
+
+    for d in devices:
+        d.stop()
+    for i in inputs:
+        i.close()
+    transcriber.close()
+    server.stop()
+    writer.write({"type": "reader", "state": "ended"})
+    writer.flush()
+    return 0
+
+
+def transcribe(args: argparse.Namespace) -> int:
+    """Plays a recording through the segmenter as fast as it reads, and prints `speech` lines whose
+    `start_ms` and `end_ms` are from the start of the file."""
+    samples, rate = read_wav(Path(args.file))
+    server = WhisperServer(model_path(args.model), Path(args.log))
+    seg = Segmenter(rate)
+    block = rate // 10
+    utterances: list[Utterance] = []
+    for i in range(0, len(samples), block):
+        part = samples[i : i + block]
+        utterances += seg.push(part, (i + len(part)) * 1000 / rate)
+    if (u := seg.finish()) is not None:
+        utterances.append(u)
+    total = 0.0
+    for n, u in enumerate(utterances):
+        began = time.monotonic()
+        text = server.transcribe(resample(u.samples, u.rate))
+        total += time.monotonic() - began
+        print(encode({"type": "speech", "number": n, "from": args.source, "text": text,
+                      "start_ms": u.start_ms, "end_ms": u.end_ms}), flush=True)
+    server.stop()
+    log(f"{len(samples) / rate:.1f}s of audio, {len(utterances)} utterances, whisper {total:.2f}s")
+    return 0
+
+
+def record_mic(args: argparse.Namespace) -> int:
+    blocks: list[np.ndarray] = []
+    mic = Microphone(lambda s, _t: blocks.append(s), args.mic_device)
+    stop = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    mic.start()
+    log(f"recording {mic.name} at {mic.rate} Hz into {args.file}; Ctrl-C to stop")
+    stop.wait(args.seconds or None)
+    mic.stop()
+    samples = np.concatenate(blocks) if blocks else np.zeros(0, np.float32)
+    Path(args.file).write_bytes(wav_bytes(samples, mic.rate))
+    log(f"{len(samples) / mic.rate:.1f}s written")
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="xlisten")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    lp = sub.add_parser("listen", help="the microphone and the apps' sound into --out")
+    lp.add_argument("--out", required=True)
+    lp.add_argument("--model", default=DEFAULT_MODEL,
+                    help="a name of XmoQ's cache (tiny, small-q5_1, large-v3-turbo-q5_0) or a .bin")
+    lp.add_argument("--no-mic", dest="mic", action="store_false")
+    lp.add_argument("--no-system", dest="system", action="store_false")
+    lp.add_argument("--mic-device", default=None, help="a name or number of sounddevice")
+    lp.add_argument("--keep-audio", default=None,
+                    help="a folder to keep each utterance in as a WAV file; none kept without it")
+    lp.add_argument("--seconds", type=float, default=0, help="stop after this many seconds")
+    lp.set_defaults(run=listen)
+
+    tp = sub.add_parser("transcribe", help="a WAV file, as the lines listen would write")
+    tp.add_argument("file")
+    tp.add_argument("--model", default=DEFAULT_MODEL)
+    tp.add_argument("--source", default="me")
+    tp.add_argument("--log", default="/dev/null", help="where whisper-server writes")
+    tp.set_defaults(run=transcribe)
+
+    rp = sub.add_parser("record-mic", help="the microphone into a WAV file")
+    rp.add_argument("file")
+    rp.add_argument("--mic-device", default=None)
+    rp.add_argument("--seconds", type=float, default=0)
+    rp.set_defaults(run=record_mic)
+
+    args = p.parse_args()
+    return int(args.run(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
