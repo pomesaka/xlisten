@@ -1,6 +1,10 @@
 //! The lines of `events/`, as `AGENT.md` tells them to the agent, after `XmoQ`'s `xmoq-agent`
 //! (`fixtures/agent-lines/README.md` there). `at`, the writer's clock, is added where a line is
 //! written.
+//!
+//! WHY `Serialize` here, in the domain: the form of a line is what the agent reads, part of the
+//! model and not a detail of the folder. WHY NOT a type of the same fields for the wire: the two
+//! would be kept in step by hand.
 
 use serde::Serialize;
 

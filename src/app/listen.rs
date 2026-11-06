@@ -18,6 +18,9 @@ use crate::domain::time::Millis;
 use crate::domain::utterance::{AudioBlock, Segmenter, Utterance};
 
 /// An input that has begun to hand its sound over.
+///
+/// WHY NOT a port for the inputs, as for the rest of the world outside: each hands blocks into a
+/// channel already, and a channel is all `listen` needs of it.
 pub struct Feed {
     pub input: Input,
     pub rate: u32,

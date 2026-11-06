@@ -1,7 +1,12 @@
 //! xlisten: transcribes the microphone and the sound of meeting apps into a folder an agent reads.
 //!
 //! This file is the composition root: it parses the command line, makes the adapters of `infra`,
-//! and hands them to a use case of `app` (`docs/adr/0001-domain-model-and-layers.md`).
+//! and hands them to a use case of `app`.
+//!
+//! The modules depend inwards only: `infra` on `app` and `domain`, `app` on `domain`, `domain` on
+//! neither; `dsp` is of no layer. `rg 'crate::(infra|app|cli)' src/domain src/app src/dsp.rs`
+//! finds a wrong one. WHY NOT a crate a layer (a workspace): one binary of some 2,000 lines, where
+//! modules keep the direction at a glance.
 
 mod app;
 mod cli;
