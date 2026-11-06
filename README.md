@@ -2,7 +2,7 @@
 
 Transcribes the meetings of this Mac into a folder that an agent (Claude Code) reads: the microphone, and the sound the apps play (Google Meet in a browser, Zoom, a Slack huddle). Each input is transcribed on its own by whisper.cpp, so a line says whether it was `me` (the microphone) or `others` (the apps), and Nemotron 3 Diarization tells the others apart as `A`, `B`, ... The microphone goes through NVIDIA's RE-USE (speech enhancement) first; `--no-enhance` leaves it out. **Whether RE-USE makes the transcript better was not compared.** Nothing leaves the Mac.
 
-One binary in Rust: whisper.cpp through `whisper-rs` (as XmoQ's `xmoq-speech`), RE-USE and the diarization through the C API of speech.cpp (`src/speech.rs`), the process tap of Core Audio through `objc2-core-audio` (`src/tap.rs`), the microphone through `cpal`.
+One binary in Rust: whisper.cpp through `whisper-rs` (as XmoQ's `xmoq-speech`), RE-USE and the diarization through the C API of speech.cpp (`src/infra/speech_cpp/`), the process tap of Core Audio through `objc2-core-audio` (`src/infra/tap.rs`), the microphone through `cpal`.
 
 ## Running it
 
@@ -36,7 +36,7 @@ What was measured, and how fast it is: [docs/experiments/](docs/experiments/).
 
 - The sound of every app is tapped, not only the meeting's: music or a video playing is transcribed as `others`.
 - With speakers rather than headphones, the microphone hears the others too, and their words come again as `me`.
-- An utterance is cut where the sound gets quiet (`src/segmenter.rs`); a line comes at least `CLOSE_MS` after the speaker stops, and where it never gets quiet, every `LONGEST_MS`.
+- An utterance is cut where the sound gets quiet (`src/domain/utterance.rs`); a line comes at least `CLOSE_MS` after the speaker stops, and where it never gets quiet, every `LONGEST_MS`.
 - Whisper writes words of its own (`ご視聴ありがとうございました`) where Silero hears a voice it cannot read, English among them: whisper is told the language is Japanese.
 - The labels of the speakers start again with each run, and two voices may get one label.
 - Meet and Zoom were not run yet.

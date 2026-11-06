@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
-block2 = "0.6.2"
+clap = { version = "4.6.7", features = ["derive"] }
 cpal = "0.18.2"
 ctrlc = { version = "3.5.2", features = ["termination"] }
 hound = "3.5.1"
@@ -16,11 +16,12 @@ objc2-core-audio = "0.3.2"
 objc2-core-audio-types = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-foundation = "0.3.2"
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 whisper-rs = { version = "=0.16.0", features = ["metal"] }
 
 [lints.rust]
-# Only the bindings of C (src/speech.rs, src/tap.rs) are unsafe; each says so with an `allow`.
+# Only the bindings of C (src/infra/speech_cpp/, src/infra/tap.rs) are unsafe; each says so with an `allow`.
 unsafe_code = "deny"
 
 [lints.clippy]

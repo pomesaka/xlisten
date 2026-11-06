@@ -1,13 +1,22 @@
 //! speech.cpp, through its C API (`include/speech.h` of v0.10.1, built by `mise run speech` into
 //! `.cache/speech.cpp/`): NVIDIA's RE-USE (speech enhancement) and Nemotron 3 Diarization (who
-//! speaks where, as the audio arrives). The one file that calls it, so the `unsafe` of it is here.
+//! speaks where, as the audio arrives). The one module that calls it, so the `unsafe` of it is here.
 #![allow(unsafe_code, reason = "the bindings of speech.cpp's C API")]
 
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::path::Path;
-use std::ptr;
+pub mod speakers;
 
-use anyhow::{Result, anyhow, bail};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::path::{Path, PathBuf};
+use std::ptr::{self, NonNull};
+
+use anyhow::{Context as _, Result, anyhow, bail};
+
+use crate::app::ports::Enhancer;
+use crate::domain::speaker::{SpeakerLabel, SpeakerTurn};
+
+/// The files `mise run speech` fetches into `.cache/models`.
+pub const RE_USE: &str = "NVIDIA-NemotronLabs-RE-USE-10M-F32.gguf";
+pub const DIARIZATION: &str = "Nemotron-3-Diarization-99M-Q8_0.gguf";
 
 #[repr(C)]
 struct Model {
@@ -89,17 +98,32 @@ fn check(status: c_int, what: &str) -> Result<()> {
 
 /// A model of speech.cpp, loaded on its default device (Metal).
 pub struct SpeechModel {
-    model: *mut Model,
+    model: NonNull<Model>,
 }
 
-// SAFETY: speech.cpp's models are used from one thread at a time here (each is owned by one
-// worker), which its documentation allows; the pointer itself may move between threads.
+// SAFETY: a model is used from one thread at a time (each is owned by one worker, or sits behind
+// a Mutex), which speech.cpp's documentation allows; the pointer itself may move between threads.
 unsafe impl Send for SpeechModel {}
 
 impl SpeechModel {
+    /// One of the files `mise run speech` fetched (`RE_USE`, `DIARIZATION`).
+    ///
     /// # Errors
-    /// When the file cannot be loaded.
-    pub fn load(path: &Path) -> Result<Self> {
+    /// When it is not there, or cannot be loaded.
+    pub fn fetched(file: &str) -> Result<Self> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".cache/models")
+            .join(file);
+        if !path.exists() {
+            bail!(
+                "{} is not there: run `mise run speech` first",
+                path.display()
+            );
+        }
+        Self::load(&path)
+    }
+
+    fn load(path: &Path) -> Result<Self> {
         let c = CString::new(path.to_string_lossy().as_bytes()).map_err(|e| anyhow!("{e}"))?;
         let mut model = ptr::null_mut();
         // SAFETY: `c` is a valid C string; NULL params take the defaults.
@@ -107,24 +131,48 @@ impl SpeechModel {
             unsafe { speech_model_load(c.as_ptr(), ptr::null(), &raw mut model) },
             &format!("loading {}", path.display()),
         )?;
-        Ok(Self { model })
+        Ok(Self {
+            model: NonNull::new(model).context("speech.cpp: a model of NULL")?,
+        })
     }
 
     fn request(&self) -> Result<RequestGuard> {
         let mut request = ptr::null_mut();
         // SAFETY: the model is loaded and outlives the request (RequestGuard is dropped first).
         check(
-            unsafe { speech_request_new(self.model, &raw mut request) },
+            unsafe { speech_request_new(self.model.as_ptr(), &raw mut request) },
             "a request",
         )?;
-        Ok(RequestGuard(request))
+        Ok(RequestGuard(
+            NonNull::new(request).context("speech.cpp: a request of NULL")?,
+        ))
     }
 
-    /// RE-USE: the same audio with its noise and the echo of a room taken out, at the same rate.
+    /// A diarization of audio at `rate` that arrives a piece at a time, in its `low_latency` mode.
+    /// It must be dropped before this model (`speakers::State` holds both, in that order).
     ///
     /// # Errors
     /// When speech.cpp fails.
-    pub fn enhance(&self, samples: &[f32], rate: u32) -> Result<Vec<f32>> {
+    pub fn diarization(&self, rate: u32) -> Result<Diarizer> {
+        let request = self.request()?;
+        let mut d = ptr::null_mut();
+        // SAFETY: the request is valid; speech.cpp copies its options.
+        check(
+            unsafe {
+                speech_diarization_start(request.0.as_ptr(), c_int::try_from(rate)?, &raw mut d)
+            },
+            "starting a diarization",
+        )?;
+        Ok(Diarizer {
+            d: NonNull::new(d).context("speech.cpp: a diarization of NULL")?,
+            given: 0,
+        })
+    }
+}
+
+impl Enhancer for SpeechModel {
+    /// RE-USE.
+    fn enhance(&mut self, samples: &[f32], rate: u32) -> Result<Vec<f32>> {
         extern "C" fn gather(samples: *const f32, n: usize, user: *mut c_void) -> c_int {
             // SAFETY: `user` is the `Vec` below, alive for the call; speech.cpp hands `n` samples.
             unsafe {
@@ -137,61 +185,41 @@ impl SpeechModel {
         let rate = c_int::try_from(rate)?;
         // SAFETY: the samples are copied by speech.cpp.
         check(
-            unsafe { speech_request_set_audio(request.0, samples.as_ptr(), samples.len(), rate) },
+            unsafe {
+                speech_request_set_audio(request.0.as_ptr(), samples.as_ptr(), samples.len(), rate)
+            },
             "the audio",
         )?;
         let mut out: Vec<f32> = Vec::with_capacity(samples.len());
         // SAFETY: `out` lives until speech_enhance returns, which calls `gather` only meanwhile.
         check(
-            unsafe { speech_enhance(request.0, gather, (&raw mut out).cast()) },
+            unsafe { speech_enhance(request.0.as_ptr(), gather, (&raw mut out).cast()) },
             "enhancing",
         )?;
         Ok(out)
-    }
-
-    /// A diarization of audio at `rate` that arrives a piece at a time, in its `low_latency` mode.
-    ///
-    /// # Errors
-    /// When speech.cpp fails.
-    pub fn diarization(&self, rate: u32) -> Result<Diarizer> {
-        let request = self.request()?;
-        let mut d = ptr::null_mut();
-        // SAFETY: the request is valid; speech.cpp copies its options.
-        check(
-            unsafe { speech_diarization_start(request.0, c_int::try_from(rate)?, &raw mut d) },
-            "starting a diarization",
-        )?;
-        Ok(Diarizer { d, given: 0 })
     }
 }
 
 impl Drop for SpeechModel {
     fn drop(&mut self) {
-        // SAFETY: every request and diarization of it is freed before (they borrow nothing, but the
-        // owners drop them first: see `crate::listen`).
-        unsafe { speech_model_free(self.model) }
+        // SAFETY: every request and diarization of it was dropped before (requests within the call
+        // that made them, a diarization by the field order of `speakers::State`).
+        unsafe { speech_model_free(self.model.as_ptr()) }
     }
 }
 
-struct RequestGuard(*mut Request);
+struct RequestGuard(NonNull<Request>);
 
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         // SAFETY: the request is not running once its call returned.
-        unsafe { speech_request_free(self.0) }
+        unsafe { speech_request_free(self.0.as_ptr()) }
     }
 }
 
-/// A segment of one speaker, in seconds from the start of the audio pushed.
-#[derive(Clone, Copy, Debug)]
-pub struct Segment {
-    pub start: f64,
-    pub end: f64,
-    pub speaker: i32,
-}
-
 pub struct Diarizer {
-    d: *mut Diarization,
+    d: NonNull<Diarization>,
+    /// How many segments were given already.
     given: usize,
 }
 
@@ -200,55 +228,59 @@ pub struct Diarizer {
 unsafe impl Send for Diarizer {}
 
 impl Diarizer {
-    /// Pushes the next samples and gives the segments that became final.
+    /// Pushes the next samples and gives the turns that became final.
     ///
     /// # Errors
     /// When speech.cpp fails.
-    pub fn push(&mut self, samples: &[f32]) -> Result<Vec<Segment>> {
+    pub fn push(&mut self, samples: &[f32]) -> Result<Vec<SpeakerTurn>> {
+        let d = self.d.as_ptr();
         // SAFETY: the samples are copied.
         check(
-            unsafe { speech_diarization_push(self.d, samples.as_ptr(), samples.len()) },
+            unsafe { speech_diarization_push(d, samples.as_ptr(), samples.len()) },
             "diarizing",
         )?;
         // SAFETY: the diarization is valid.
-        let count = unsafe { speech_diarization_segment_count(self.d) };
-        let mut out = Vec::new();
+        let count = unsafe { speech_diarization_segment_count(d) };
+        let mut turns = Vec::new();
         for i in self.given..count {
-            let (mut start, mut end, mut speaker) = (0.0, 0.0, 0);
+            let (mut start_s, mut end_s, mut speaker) = (0.0, 0.0, 0);
             // SAFETY: `i` is below the count; the pointers are to locals.
             check(
                 unsafe {
                     speech_diarization_segment(
-                        self.d,
+                        d,
                         i,
-                        &raw mut start,
-                        &raw mut end,
+                        &raw mut start_s,
+                        &raw mut end_s,
                         &raw mut speaker,
                     )
                 },
                 "a segment",
             )?;
-            out.push(Segment {
-                start,
-                end,
-                speaker,
-            });
+            // The model tells 8 speakers apart at the most, each one a letter.
+            if let Some(speaker) = SpeakerLabel::from_index(speaker) {
+                turns.push(SpeakerTurn {
+                    start_s,
+                    end_s,
+                    speaker,
+                });
+            }
         }
         self.given = count;
-        Ok(out)
+        Ok(turns)
     }
 
-    /// The time, in seconds of the audio pushed, before which every segment has been given.
+    /// The time, in seconds of the audio pushed, before which every turn has been given.
     #[must_use]
     pub fn settled(&self) -> f64 {
         // SAFETY: the diarization is valid.
-        unsafe { speech_diarization_settled(self.d) }
+        unsafe { speech_diarization_settled(self.d.as_ptr()) }
     }
 }
 
 impl Drop for Diarizer {
     fn drop(&mut self) {
         // SAFETY: the diarization is not used after this.
-        unsafe { speech_diarization_free(self.d) }
+        unsafe { speech_diarization_free(self.d.as_ptr()) }
     }
 }

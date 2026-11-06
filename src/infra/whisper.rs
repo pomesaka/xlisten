@@ -5,6 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
+
+use crate::app::ports::SpeechToText;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
     WhisperVadContext, WhisperVadContextParams,
@@ -72,15 +74,12 @@ impl Whisper {
             })?;
         Ok(Self { state, silero })
     }
+}
 
-    /// The words of `samples` (mono, 16 kHz), trimmed; empty where Silero hears no voice in them.
-    ///
+impl SpeechToText for Whisper {
     /// WHY Silero first: over music and noise, whisper writes words of its own
     /// (`ご視聴ありがとうございました`).
-    ///
-    /// # Errors
-    /// When whisper.cpp fails.
-    pub fn text(&mut self, samples: &[f32]) -> Result<String> {
+    fn read(&mut self, samples: &[f32]) -> Result<String> {
         self.silero
             .detect_speech(samples)
             .map_err(|e| anyhow!("Silero: {e}"))?;
